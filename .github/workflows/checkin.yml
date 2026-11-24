@@ -10,25 +10,26 @@ on:
         default: false
 
   schedule:
-    # 上午候选时段 UTC
-    - cron: '57 23 * * *'
-    - cron: '2 0 * * *'
-    - cron: '7 0 * * *'
-    - cron: '12 0 * * *'
 
-    # 晚上候选时段 UTC
-    - cron: '57 11 * * *'
-    - cron: '7 12 * * *'
-    - cron: '17 12 * * *'
-    - cron: '27 12 * * *'
-    - cron: '37 12 * * *'
-    - cron: '47 12 * * *'
-    - cron: '57 12 * * *'
-    - cron: '7 13 * * *'
-    - cron: '17 13 * * *'
-    - cron: '27 13 * * *'
-    - cron: '37 13 * * *'
-    - cron: '47 13 * * *'
+    # 周一至周五上午 08:00-08:20
+    - cron: '57 23 * * 0-4'
+    - cron: '2 0 * * 1-5'
+    - cron: '7 0 * * 1-5'
+    - cron: '12 0 * * 1-5'
+
+    # 周一至周五晚上 20:00-22:00
+    - cron: '57 11 * * 1-5'
+    - cron: '7 12 * * 1-5'
+    - cron: '17 12 * * 1-5'
+    - cron: '27 12 * * 1-5'
+    - cron: '37 12 * * 1-5'
+    - cron: '47 12 * * 1-5'
+    - cron: '57 12 * * 1-5'
+    - cron: '7 13 * * 1-5'
+    - cron: '17 13 * * 1-5'
+    - cron: '27 13 * * 1-5'
+    - cron: '37 13 * * 1-5'
+    - cron: '47 13 * * 1-5'
 
 # ========================================
 # 个人信息及测试配置
@@ -40,8 +41,8 @@ env:
 
   CHECKIN_URL: 'https://qr61.cn/oAX7GH/qCKSFvS'
 
-  LATITUDE: '29.52876'
-  LONGITUDE: '106.56624'
+  LATITUDE: '29.537117'
+  LONGITUDE: '106.60642'
   ACCURACY: '50'
 
   SMTP_HOST: 'smtp.qq.com'
@@ -56,7 +57,7 @@ env:
   SUCCESS_TEXT: '签到成功'
 
   # 仅在获得授权的测试环境开启提交
-  ALLOW_TEST_SUBMIT: 'false'
+  ALLOW_TEST_SUBMIT: 'true'
 
   SCHEDULE: ${{ github.event.schedule }}
 
@@ -155,7 +156,9 @@ jobs:
 
           utc = launch.astimezone(ZoneInfo("UTC"))
 
-          expected = f"{utc.minute} {utc.hour} * * *"
+          days = "0-4" if utc.hour == 23 else "1-5"
+
+          expected = f"{utc.minute} {utc.hour} * * {days}"
 
           selected = schedule == expected
 
