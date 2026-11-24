@@ -1,5 +1,5 @@
 
-name: Checkin Website Test
+name: Cloud Location Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  browser-test:
+  location-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -23,46 +23,64 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Test Website
+      - name: Test Geolocation
         run: |
           python <<'PY'
+          import json
           from playwright.sync_api import sync_playwright
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
 
               context = browser.new_context(
-                  locale="zh-CN",
-                  timezone_id="Asia/Shanghai",
-                  permissions=["geolocation"]
+                  geolocation={
+                      "latitude": 51.5074,
+                      "longitude": -0.1278,
+                      "accuracy": 50
+                  }
+              )
+
+              url = "https://geo-test.example/"
+
+              context.grant_permissions(
+                  ["geolocation"], origin=url
               )
 
               page = context.new_page()
 
-              page.goto(
-                  "https://qr61.cn/oAX7GH/qCKSFvS",
-                  wait_until="domcontentloaded",
-                  timeout=60000
+              page.route(
+                  "**/*",
+                  lambda route: route.fulfill(
+                      content_type="text/html",
+                      body="<html><body>Location Test</body></html>"
+                  )
               )
 
-              page.wait_for_timeout(15000)
+              page.goto(url)
 
-              print("URL:", page.url)
-              print("Title:", page.title())
-              print(page.locator("body").inner_text())
+              result = page.evaluate("""
+                  () => new Promise(resolve => {
+                      navigator.geolocation.getCurrentPosition(
+                          p => resolve({
+                              latitude: p.coords.latitude,
+                              longitude: p.coords.longitude,
+                              accuracy: p.coords.accuracy
+                          }),
+                          e => resolve({
+                              error: e.message,
+                              code: e.code
+                          }),
+                          {timeout: 10000, maximumAge: 0}
+                      )
+                  })
+              """)
 
-              page.screenshot(
-                  path="result.png",
-                  full_page=True
-              )
+              print(json.dumps(result, indent=2))
 
               browser.close()
-          PY
 
-      - name: Save Screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-result
-          path: result.png
-          retention-days: 1
+              assert abs(result.get("latitude", 0) - 51.5074) < 0.0001
+              assert abs(result.get("longitude", 0) + 0.1278) < 0.0001
+
+              print("LOCATION TEST PASSED")
+          PY
