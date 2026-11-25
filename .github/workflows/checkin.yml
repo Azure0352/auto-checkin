@@ -1,23 +1,19 @@
-
-name: Auto Check-in Pro V2.5
+name: Auto Check-in Pro V2.7
 
 on:
   workflow_dispatch:
     inputs:
       test_email:
-        description: '是否测试失败报警邮件'
+        description: '测试失败邮件（不访问网页）'
         type: boolean
         default: false
-
   schedule:
-
-    # 周一至周五上午 08:00-08:20
+    # UTC：北京时间周一至周五上午
     - cron: '57 23 * * 0-4'
     - cron: '2 0 * * 1-5'
     - cron: '7 0 * * 1-5'
     - cron: '12 0 * * 1-5'
-
-    # 周一至周五晚上 20:00-22:00
+    # UTC：北京时间周一至周五晚上
     - cron: '57 11 * * 1-5'
     - cron: '7 12 * * 1-5'
     - cron: '17 12 * * 1-5'
@@ -31,36 +27,6 @@ on:
     - cron: '37 13 * * 1-5'
     - cron: '47 13 * * 1-5'
 
-# ========================================
-# 个人信息及测试配置
-# ========================================
-
-env:
-  CHECKIN_NAME: '姚金航'
-  CHECKIN_ID: 's260331026'
-
-  CHECKIN_URL: 'https://qr61.cn/oAX7GH/qCKSFvS'
-
-  LATITUDE: '29.537117'
-  LONGITUDE: '106.60642'
-  ACCURACY: '50'
-
-  SMTP_HOST: 'smtp.qq.com'
-  SMTP_PORT: '465'
-  SMTP_USER: '1511602303@qq.com'
-  MAIL_TO: '1511602303@qq.com'
-
-  NAME_PLACEHOLDER: '必填项，请输入'
-  ID_PLACEHOLDER: '请输入'
-
-  BUTTON_TEXT: '我来了'
-  SUCCESS_TEXT: '签到成功'
-
-  # 仅在获得授权的测试环境开启提交
-  ALLOW_TEST_SUBMIT: 'true'
-
-  SCHEDULE: ${{ github.event.schedule }}
-
 permissions:
   contents: read
 
@@ -68,613 +34,62 @@ concurrency:
   group: checkin-${{ github.event.schedule || github.run_id }}
   cancel-in-progress: false
 
+# 这里仅保存非敏感配置。真实个人信息不写入文件。
+env:
+  NAME_PLACEHOLDER: '必填项，请输入'
+  ID_PLACEHOLDER: '请输入'
+  BUTTON_TEXT: '我来了'
+  SUCCESS_TEXT: '签到成功'
+  SMTP_HOST: 'smtp.qq.com'
+  SMTP_PORT: '465'
+  # 默认无提交测试；仅用于明确授权的独立测试环境。
+  ALLOW_TEST_SUBMIT: 'false'
+  SCHEDULE: ${{ github.event.schedule }}
+
 jobs:
   auto-checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 25
     steps:
-
-      # ==================================
-      # 测试邮件
-      # ==================================
-
       - name: Test Email
         if: github.event_name == 'workflow_dispatch' && inputs.test_email == true
         run: |
-          echo "主动模拟失败，测试报警邮件"
+          echo '模拟失败，测试邮件，不访问网页'
           exit 1
-
-      # ==================================
-      # 智能随机调度
-      # ==================================
 
       - name: Smart Schedule
         id: plan
         run: |
           python3 <<'PY'
+          import hashlib
           import os
           import random
-          import hashlib
-
-          from datetime import datetime, timedelta
+          from datetime import datetime, timedelta, timezone
           from zoneinfo import ZoneInfo
 
-          TZ = ZoneInfo("Asia/Shanghai")
-          now = datetime.now(TZ)
-
-          def output(key, value):
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write(f"{key}={value}\n")
-
-          if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
-              output("run", "true")
-              output("mode", "manual")
-              print("手动测试模式")
-              exit(0)
-
-          schedule = os.environ["SCHEDULE"]
-          hour = int(schedule.split()[1])
-
-          if hour in (23, 0):
-              mode = "morning"
-              start_hour = 8
-              duration = 20
-              slot_minutes = 5
-          else:
-              mode = "evening"
-              start_hour = 20
-              duration = 120
-              slot_minutes = 10
-
-          start = now.replace(
-              hour=start_hour,
-              minute=0,
-              second=0,
-              microsecond=0
-          )
-
-          seed_text = f"{now:%Y-%m-%d}-{mode}"
-
-          seed = int(
-              hashlib.sha256(
-                  seed_text.encode()
-              ).hexdigest(),
-              16
-          )
-
-          rng = random.Random(seed)
-          offset = rng.randrange(duration * 60)
-
-          target = start + timedelta(seconds=offset)
-
-          slot = offset // (slot_minutes * 60)
-
-          launch = start + timedelta(
-              minutes=slot * slot_minutes - 3
-          )
-
-          utc = launch.astimezone(ZoneInfo("UTC"))
-
-          days = "0-4" if utc.hour == 23 else "1-5"
-
-          expected = f"{utc.minute} {utc.hour} * * {days}"
-
-          selected = schedule == expected
-
-          output("run", str(selected).lower())
-          output("mode", mode)
-          output("target", target.isoformat())
-
-          print("当前日期:", now.date())
-          print("任务类型:", mode)
-          print("每日随机种子:", seed_text)
-          print("计划时间:", target)
-          print("是否执行:", selected)
-
-          if not selected:
-              print("非目标时段，直接结束")
-              exit(0)
-
-          if now >= start + timedelta(minutes=duration):
-              raise RuntimeError("已错过时间窗口")
-          PY
-
-      # ==================================
-      # Python 环境
-      # ==================================
-
-      - name: Setup Python
-        if: steps.plan.outputs.run == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # ==================================
-      # 浏览器安装
-      # ==================================
-
-      - name: Install Playwright
-        if: steps.plan.outputs.run == 'true'
-        run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
-
-      # ==================================
-      # 核心程序
-      # ==================================
-
-      - name: Auto Check-in
-        if: steps.plan.outputs.run == 'true'
-        env:
-          TARGET: ${{ steps.plan.outputs.target }}
-          MODE: ${{ steps.plan.outputs.mode }}
-
-        run: |
-          python <<'PY'
-          import os
-          import time
-
-          from datetime import datetime, timedelta
-          from zoneinfo import ZoneInfo
-          from playwright.sync_api import sync_playwright
-          from playwright.sync_api import expect
-
-          TZ = ZoneInfo("Asia/Shanghai")
-
-          URL = os.environ["CHECKIN_URL"]
-          NAME = os.environ["CHECKIN_NAME"]
-          EMPLOYEE_ID = os.environ["CHECKIN_ID"]
-
-          LATITUDE = float(os.environ["LATITUDE"])
-          LONGITUDE = float(os.environ["LONGITUDE"])
-          ACCURACY = float(os.environ["ACCURACY"])
-
-          MODE = os.environ["MODE"]
-          MANUAL = MODE == "manual"
-
-          ALLOW_SUBMIT = (
-              os.environ["ALLOW_TEST_SUBMIT"] == "true"
-              and not MANUAL
-          )
-
-          def log(message):
-              now = datetime.now(TZ)
-              print(
-                  f"[{now:%Y-%m-%d %H:%M:%S}] {message}",
-                  flush=True
-              )
-
-          # ==============================
-          # 时间检查
-          # ==============================
-
-          if MANUAL:
-              NAME = "a"
-              EMPLOYEE_ID = "b"
-              log("手动测试模式，不提交签到")
-
-          else:
-              if not NAME or not EMPLOYEE_ID:
-                  raise RuntimeError("姓名或工号未配置")
-
-              if os.getenv("GITHUB_RUN_ATTEMPT", "1") != "1":
-                  raise RuntimeError("禁止重复运行定时任务")
-
-              target = datetime.fromisoformat(
-                  os.environ["TARGET"]
-              )
-
-              start = target.replace(
-                  hour=8 if MODE == "morning" else 20,
-                  minute=0,
-                  second=0,
-                  microsecond=0
-              )
-
-              end = start + timedelta(
-                  minutes=20 if MODE == "morning" else 120
-              )
-
-              if datetime.now(TZ) >= end:
-                  raise RuntimeError("已超出执行时间窗口")
-
-              log(f"计划执行时间: {target:%H:%M:%S}")
-
-              prepare = target - timedelta(seconds=90)
-
-              remaining = (
-                  prepare - datetime.now(TZ)
-              ).total_seconds()
-
-              if remaining > 0:
-                  log(f"等待 {remaining:.0f} 秒")
-                  time.sleep(remaining)
-
-          # ==============================
-          # 浏览器启动
-          # ==============================
-
-          with sync_playwright() as p:
-
-              browser = p.chromium.launch(
-                  headless=True
-              )
-
-              context = browser.new_context(
-                  geolocation={
-                      "latitude": LATITUDE,
-                      "longitude": LONGITUDE,
-                      "accuracy": ACCURACY
-                  },
-                  permissions=["geolocation"],
-                  locale="zh-CN",
-                  timezone_id="Asia/Shanghai",
-                  viewport={
-                      "width": 1280,
-                      "height": 900
-                  }
-              )
-
-              page = context.new_page()
-
-              page.set_default_timeout(60000)
-
-              stage = "打开网页"
-
-              try:
-
-                  # ======================
-                  # 加载网页
-                  # ======================
-
-                  log("正在打开测试网站")
-
-                  response = page.goto(
-                      URL,
-                      wait_until="domcontentloaded",
-                      timeout=60000
-                  )
-
-                  if response:
-                      log(f"HTTP状态码: {response.status}")
-
-                      if response.status >= 400:
-                          raise RuntimeError("网页响应异常")
-
-                  # ======================
-                  # 等待实际表单加载
-                  # ======================
-
-                  stage = "等待姓名输入框"
-
-                  log("等待动态表单加载，最长60秒")
-
-                  name_input = page.get_by_placeholder(
-                      os.environ["NAME_PLACEHOLDER"],
-                      exact=True
-                  )
-
-                  expect(name_input).to_be_visible(
-                      timeout=60000
-                  )
-
-                  expect(name_input).to_have_count(1)
-
-                  log("姓名输入框识别成功")
-
-                  stage = "等待工号输入框"
-
-                  id_input = page.get_by_placeholder(
-                      os.environ["ID_PLACEHOLDER"],
-                      exact=True
-                  )
-
-                  expect(id_input).to_be_visible(
-                      timeout=60000
-                  )
-
-                  expect(id_input).to_have_count(1)
-
-                  log("工号输入框识别成功")
-
-                  log(f"页面标题: {page.title()}")
-
-                  # ======================
-                  # 验证浏览器测试定位
-                  # ======================
-
-                  stage = "浏览器定位检测"
-
-                  position = page.evaluate("""
-                      () => new Promise((resolve, reject) => {
-                          navigator.geolocation.getCurrentPosition(
-                              p => resolve({
-                                  latitude: p.coords.latitude,
-                                  longitude: p.coords.longitude,
-                                  accuracy: p.coords.accuracy
-                              }),
-                              e => reject(new Error(e.message)),
-                              {timeout: 10000}
-                          );
-                      })
-                  """)
-
-                  log(f"测试纬度: {position['latitude']}")
-                  log(f"测试经度: {position['longitude']}")
-                  log(f"定位精度: {position['accuracy']} 米")
-
-                  if (
-                      abs(position["latitude"] - LATITUDE) > 0.000001
-                      or
-                      abs(position["longitude"] - LONGITUDE) > 0.000001
-                  ):
-                      raise RuntimeError("测试坐标不一致")
-
-                  log("浏览器测试定位验证通过")
-
-                  # ======================
-                  # 填写姓名
-                  # ======================
-
-                  stage = "填写姓名"
-
-                  name_input.fill(NAME)
-
-                  expect(name_input).to_have_value(NAME)
-
-                  log("姓名填写并验证成功")
-
-                  # ======================
-                  # 填写工号
-                  # ======================
-
-                  stage = "填写工号"
-
-                  id_input.fill(EMPLOYEE_ID)
-
-                  expect(id_input).to_have_value(
-                      EMPLOYEE_ID
-                  )
-
-                  log("工号填写并验证成功")
-
-                  # ======================
-                  # 识别蓝色按钮
-                  # ======================
-
-                  stage = "识别签到按钮"
-
-                  button = page.get_by_role(
-                      "button",
-                      name=os.environ["BUTTON_TEXT"],
-                      exact=True
-                  )
-
-                  expect(button).to_be_visible(
-                      timeout=60000
-                  )
-
-                  expect(button).to_have_count(1)
-
-                  log("成功识别蓝色按钮：我来了")
-
-                  # ======================
-                  # 定时控制
-                  # ======================
-
-                  if not MANUAL:
-
-                      remaining = (
-                          target - datetime.now(TZ)
-                      ).total_seconds()
-
-                      if remaining > 0:
-                          page.wait_for_timeout(
-                              remaining * 1000
-                          )
-
-                      now = datetime.now(TZ)
-
-                      if not (start <= now < end):
-                          raise RuntimeError("超出时间窗口")
-
-                      log(f"实际执行时间: {now:%H:%M:%S}")
-
-                  # ======================
-                  # 无提交测试
-                  # ======================
-
-                  if not ALLOW_SUBMIT:
-
-                      stage = "按钮可操作性测试"
-
-                      button.click(
-                          trial=True,
-                          timeout=10000
-                      )
-
-                      log("=" * 40)
-                      log("网页加载：通过")
-                      log("浏览器测试定位：通过")
-                      log("姓名识别：通过")
-                      log("工号识别：通过")
-                      log("姓名填写：通过")
-                      log("工号填写：通过")
-                      log("按钮识别：通过")
-                      log("按钮可操作性：通过")
-                      log("测试完成，未提交签到")
-                      log("=" * 40)
-
-                  else:
-
-                      # 仅限授权测试环境
-
-                      stage = "提交前状态检查"
-
-                      success = page.get_by_text(
-                          os.environ["SUCCESS_TEXT"],
-                          exact=True
-                      )
-
-                      if success.first.is_visible():
-                          raise RuntimeError("已存在成功提示")
-
-                      available_ms = int(
-                          (end - datetime.now(TZ))
-                          .total_seconds() * 1000
-                      )
-
-                      if available_ms <= 0:
-                          raise RuntimeError("时间窗口已结束")
-
-                      stage = "授权测试提交"
-
-                      button.click(
-                          timeout=min(5000, available_ms)
-                      )
-
-                      stage = "检测提交结果"
-
-                      success.first.wait_for(
-                          state="visible",
-                          timeout=20000
-                      )
-
-                      log("检测到测试提交成功提示")
-
-              except Exception as e:
-
-                  log("=" * 40)
-                  log(f"失败阶段: {stage}")
-                  log(f"异常类型: {type(e).__name__}")
-
-                  try:
-                      log(
-                          "姓名输入框匹配数量: "
-                          + str(page.get_by_placeholder(
-                              os.environ["NAME_PLACEHOLDER"],
-                              exact=True
-                          ).count())
-                      )
-
-                      log(
-                          "工号输入框匹配数量: "
-                          + str(page.get_by_placeholder(
-                              os.environ["ID_PLACEHOLDER"],
-                              exact=True
-                          ).count())
-                      )
-
-                      log(
-                          "签到按钮匹配数量: "
-                          + str(page.get_by_role(
-                              "button",
-                              name=os.environ["BUTTON_TEXT"],
-                              exact=True
-                          ).count())
-                      )
-
-                  except Exception:
-                      log("无法获取元素统计")
-
-                  log("=" * 40)
-
-                  raise RuntimeError(
-                      f"{stage}失败"
-                  ) from None
-
-              finally:
-                  browser.close()
-                  log("浏览器已关闭")
-
-          PY
-
-      # ==================================
-      # 失败邮件通知
-      # ==================================
-
-      - name: Send Failure Email
-        if: failure()
-        env:
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-
-        run: |
-          python3 <<'PY'
-          import os
-          import ssl
-          import smtplib
-
-          from email.message import EmailMessage
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          now = datetime.now(
-              ZoneInfo("Asia/Shanghai")
-          )
-
-          host = os.environ["SMTP_HOST"]
-          port = int(os.environ["SMTP_PORT"])
-          sender = os.environ["SMTP_USER"]
-          password = os.environ["SMTP_PASSWORD"]
-          receiver = os.environ["MAIL_TO"]
-
-          if not password:
-              raise RuntimeError("未配置SMTP授权码")
-
-          schedule = os.getenv("SCHEDULE", "")
-
-          if schedule:
-              hour = int(schedule.split()[1])
-
-              mode = (
-                  "上午任务"
-                  if hour in (23, 0)
-                  else "晚上任务"
-              )
-
-          else:
-              mode = "手动测试"
-
-          repo = os.getenv("GITHUB_REPOSITORY")
-          run_id = os.getenv("GITHUB_RUN_ID")
-
-          run_url = (
-              f"https://github.com/{repo}"
-              f"/actions/runs/{run_id}"
-          )
-
-          msg = EmailMessage()
-
-          msg["Subject"] = f"【签到异常提醒】{mode}失败"
-          msg["From"] = sender
-          msg["To"] = receiver
-
-          msg.set_content(f"""
-          Auto Check-in Pro V2.5
-
-          自动化任务运行异常！
-
-          日期：{now:%Y-%m-%d}
-          时间：{now:%H:%M:%S}
-          任务：{mode}
-          状态：运行失败
-
-          运行日志：
-          {run_url}
-
-          本邮件由系统自动发送。
-          """)
-
-          with smtplib.SMTP_SSL(
-              host,
-              port,
-              timeout=30,
-              context=ssl.create_default_context()
-          ) as server:
-
-              server.login(sender, password)
-              server.send_message(msg)
-
-          print("失败报警邮件发送成功")
-          PY
+          tz = ZoneInfo('Asia/Shanghai')
+          now = datetime.now(tz)
+          schedule = os.getenv('SCHEDULE', '')
+
+          def output(**values):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  for key, value in values.items():
+                      print(f'{key}={value}', file=f)
+
+          print('触发类型:', os.getenv('GITHUB_EVENT_NAME'))
+          print('当前北京时间:', now.isoformat())
+          print('当前UTC时间:', now.astimezone(timezone.utc).isoformat())
+          print('实际触发Cron:', repr(schedule))
+          print('当前日期:', now.date())
+          print('星期编号（周一=1）:', now.isoweekday())
+          print('运行尝试编号:', os.getenv('GITHUB_RUN_ATTEMPT', '1'))
+
+          if os.getenv('GITHUB_EVENT_NAME') == 'workflow_dispatch':
+              output(run='true', mode='manual', target='')
+              print('手动无提交测试；不受工作日限制')
+              raise SystemExit(0)
+
+          if now.weekday() >= 5:
+              output(run='false', mode='weekend', target='')
+              print('SKIPPED：北京时间周末')
+              raise SystemExit(0)
