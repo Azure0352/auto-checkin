@@ -93,3 +93,253 @@ jobs:
               output(run='false', mode='weekend', target='')
               print('SKIPPED：北京时间周末')
               raise SystemExit(0)
+
+          parts = schedule.split()
+          if len(parts) != 5:
+              raise RuntimeError('无法解析实际Cron')
+          hour = int(parts[1])
+          if hour in (23, 0):
+              mode, start_hour, duration, slot_minutes = 'morning', 8, 20, 5
+          elif hour in (11, 12, 13):
+              mode, start_hour, duration, slot_minutes = 'evening', 20, 120, 10
+          else:
+              raise RuntimeError('未知Cron时段')
+
+          start = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+          end = start + timedelta(minutes=duration)
+          seed_text = f'{now:%Y-%m-%d}-{mode}'
+          seed = int(hashlib.sha256(seed_text.encode()).hexdigest(), 16)
+          offset = random.Random(seed).randrange(duration * 60)
+          target = start + timedelta(seconds=offset)
+          slot = offset // (slot_minutes * 60)
+          launch = start + timedelta(minutes=slot * slot_minutes - 3)
+          utc = launch.astimezone(timezone.utc)
+          days = '0-4' if utc.hour == 23 else '1-5'
+          expected = f'{utc.minute} {utc.hour} * * {days}'
+          selected = parts == expected.split()
+
+          print('任务类型:', mode)
+          print('每日随机种子:', seed_text)
+          print('计划时间:', target.isoformat())
+          print('预期触发Cron:', repr(expected))
+          print('计划启动北京时间:', launch.isoformat())
+          print('是否执行:', selected)
+          print('时间窗口结束:', end.isoformat())
+          output(run=str(selected).lower(), mode=mode, target=target.isoformat())
+
+          if not selected:
+              print('SKIPPED：当前Cron不是目标时段')
+              raise SystemExit(0)
+          if now >= end:
+              raise RuntimeError('目标任务已错过时间窗口')
+          if os.getenv('GITHUB_RUN_ATTEMPT', '1') != '1':
+              raise RuntimeError('禁止重新执行定时任务')
+          print('目标时段匹配，进入浏览器测试')
+          PY
+
+      - name: Check Configuration
+        if: steps.plan.outputs.run == 'true'
+        env:
+          CHECKIN_NAME: ${{ secrets.CHECKIN_NAME }}
+          CHECKIN_ID: ${{ secrets.CHECKIN_ID }}
+          CHECKIN_URL: ${{ secrets.CHECKIN_URL }}
+          LATITUDE: ${{ secrets.LATITUDE }}
+          LONGITUDE: ${{ secrets.LONGITUDE }}
+          ACCURACY: ${{ secrets.ACCURACY }}
+        run: |
+          python3 <<'PY'
+          import os
+          from urllib.parse import urlsplit
+          keys = ('CHECKIN_NAME', 'CHECKIN_ID', 'CHECKIN_URL', 'LATITUDE', 'LONGITUDE', 'ACCURACY')
+          missing = [key for key in keys if not os.getenv(key, '').strip()]
+          if missing:
+              raise RuntimeError('缺少Secrets: ' + ', '.join(missing))
+          try:
+              url = urlsplit(os.environ['CHECKIN_URL'])
+              assert url.scheme == 'https' and url.hostname
+              assert -90 <= float(os.environ['LATITUDE']) <= 90
+              assert -180 <= float(os.environ['LONGITUDE']) <= 180
+              assert 0 <= float(os.environ['ACCURACY']) < float('inf')
+          except Exception:
+              raise RuntimeError('测试网址或坐标配置格式错误') from None
+          print('必要配置检查通过（不输出配置值）')
+          PY
+
+      - name: Setup Python
+        if: steps.plan.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        if: steps.plan.outputs.run == 'true'
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Auto Check-in
+        if: steps.plan.outputs.run == 'true'
+        env:
+          CHECKIN_NAME: ${{ secrets.CHECKIN_NAME }}
+          CHECKIN_ID: ${{ secrets.CHECKIN_ID }}
+          CHECKIN_URL: ${{ secrets.CHECKIN_URL }}
+          LATITUDE: ${{ secrets.LATITUDE }}
+          LONGITUDE: ${{ secrets.LONGITUDE }}
+          ACCURACY: ${{ secrets.ACCURACY }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          python <<'PY'
+          import os
+          import time
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          from playwright.sync_api import sync_playwright, expect
+
+          tz = ZoneInfo('Asia/Shanghai')
+          mode = os.environ['MODE']
+          manual = mode == 'manual'
+          allow_submit = os.environ['ALLOW_TEST_SUBMIT'] == 'true' and not manual
+          name = 'a' if manual else os.environ['CHECKIN_NAME']
+          employee_id = 'b' if manual else os.environ['CHECKIN_ID']
+          lat = float(os.environ['LATITUDE'])
+          lon = float(os.environ['LONGITUDE'])
+          accuracy = float(os.environ['ACCURACY'])
+
+          def log(message):
+              print(f'[{datetime.now(tz):%Y-%m-%d %H:%M:%S}] {message}', flush=True)
+
+          if not manual:
+              target = datetime.fromisoformat(os.environ['TARGET'])
+              start = target.replace(hour=8 if mode == 'morning' else 20, minute=0, second=0, microsecond=0)
+              end = start + timedelta(minutes=20 if mode == 'morning' else 120)
+              if datetime.now(tz) >= end or datetime.now(tz).weekday() >= 5:
+                  raise RuntimeError('已超出测试时间窗口')
+              wait = (target - timedelta(seconds=90) - datetime.now(tz)).total_seconds()
+              if wait > 0:
+                  log(f'等待准备时间：{wait:.0f} 秒')
+                  time.sleep(wait)
+
+          stage = '启动浏览器'
+          try:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  try:
+                      context = browser.new_context(
+                          geolocation={'latitude': lat, 'longitude': lon, 'accuracy': accuracy},
+                          permissions=['geolocation'], locale='zh-CN',
+                          timezone_id='Asia/Shanghai', viewport={'width': 1280, 'height': 900}
+                      )
+                      page = context.new_page()
+                      page.set_default_timeout(60000)
+                      stage = '打开测试网页'
+                      response = page.goto(os.environ['CHECKIN_URL'], wait_until='domcontentloaded', timeout=60000)
+                      if response is None or response.status >= 400:
+                          raise RuntimeError('网页响应异常')
+                      log(f'HTTP状态码：{response.status}')
+
+                      stage = '识别姓名输入框'
+                      name_input = page.get_by_placeholder(os.environ['NAME_PLACEHOLDER'], exact=True)
+                      expect(name_input).to_be_visible(timeout=60000)
+                      expect(name_input).to_have_count(1)
+                      stage = '识别工号输入框'
+                      id_input = page.get_by_placeholder(os.environ['ID_PLACEHOLDER'], exact=True)
+                      expect(id_input).to_be_visible(timeout=60000)
+                      expect(id_input).to_have_count(1)
+                      log('动态表单识别通过')
+
+                      stage = '浏览器测试定位验证'
+                      position = page.evaluate('''() => new Promise((resolve, reject) => {
+                          navigator.geolocation.getCurrentPosition(p => resolve({
+                              latitude: p.coords.latitude, longitude: p.coords.longitude,
+                              accuracy: p.coords.accuracy
+                          }), () => reject(new Error('geolocation failed')), {timeout: 10000});
+                      })''')
+                      if abs(position['latitude']-lat)>1e-6 or abs(position['longitude']-lon)>1e-6 or abs(position['accuracy']-accuracy)>1e-6:
+                          raise RuntimeError('测试定位不一致')
+                      log('浏览器测试定位验证通过（不输出坐标）')
+
+                      stage = '填写姓名'
+                      name_input.fill(name)
+                      expect(name_input).to_have_value(name)
+                      stage = '填写工号'
+                      id_input.fill(employee_id)
+                      expect(id_input).to_have_value(employee_id)
+                      log('表单填写验证通过（不输出个人信息）')
+
+                      stage = '识别按钮'
+                      button = page.get_by_role('button', name=os.environ['BUTTON_TEXT'], exact=True)
+                      expect(button).to_be_visible(timeout=60000)
+                      expect(button).to_have_count(1)
+                      if not manual:
+                          remaining = (target-datetime.now(tz)).total_seconds()
+                          if remaining > 0:
+                              page.wait_for_timeout(remaining*1000)
+                          now = datetime.now(tz)
+                          if not start <= now < end or now.weekday() >= 5:
+                              raise RuntimeError('已超出测试时间窗口')
+                          log(f'实际测试时间：{now.isoformat()}')
+
+                      if not allow_submit:
+                          stage = '按钮可操作性测试'
+                          button.click(trial=True, timeout=10000)
+                          log('PASSED：无提交测试通过，未提交记录')
+                      else:
+                          # 仅在老师明确授权的独立测试表单中使用。
+                          stage = '提交前状态检查'
+                          success = page.get_by_text(os.environ['SUCCESS_TEXT'], exact=True).first
+                          if success.is_visible():
+                              raise RuntimeError('页面已有成功提示')
+                          available_ms = int((end-datetime.now(tz)).total_seconds()*1000)
+                          if available_ms <= 0:
+                              raise RuntimeError('时间窗口已结束')
+                          stage = '授权测试提交'
+                          button.click(timeout=min(5000, available_ms))
+                          stage = '检测提交结果'
+                          success.wait_for(state='visible', timeout=20000)
+                          log('PASSED：检测到测试提交成功提示')
+                  finally:
+                      browser.close()
+          except Exception as exc:
+              # 不输出原始异常：可能包含网址、输入值或他人信息。
+              log(f'FAILED：{stage}；异常类型：{type(exc).__name__}')
+              raise RuntimeError(f'{stage}失败') from None
+          PY
+
+      - name: Send Failure Email
+        if: failure()
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MODE: ${{ steps.plan.outputs.mode }}
+        run: |
+          python3 <<'PY'
+          import os
+          import ssl
+          import smtplib
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from email.message import EmailMessage
+
+          required = ('SMTP_USER', 'MAIL_TO', 'SMTP_PASSWORD')
+          missing = [key for key in required if not os.getenv(key, '').strip()]
+          if missing:
+              raise RuntimeError('缺少邮件Secrets: ' + ', '.join(missing))
+          mode = os.getenv('MODE') or ('manual' if os.getenv('GITHUB_EVENT_NAME') == 'workflow_dispatch' else 'unknown')
+          label = {'morning':'上午任务','evening':'晚上任务','manual':'手动测试'}.get(mode, '调度任务')
+          now = datetime.now(ZoneInfo('Asia/Shanghai'))
+          url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          msg = EmailMessage()
+          msg['Subject'] = f'【自动化测试异常】{label}失败'
+          msg['From'] = os.environ['SMTP_USER']
+          msg['To'] = os.environ['MAIL_TO']
+          msg.set_content(f'Auto Check-in Pro V2.7\n北京时间：{now:%Y-%m-%d %H:%M:%S}\n任务：{label}\n状态：未确认任务成功\n运行日志：{url}')
+          try:
+              with smtplib.SMTP_SSL(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT']), timeout=30, context=ssl.create_default_context()) as server:
+                  server.login(os.environ['SMTP_USER'], os.environ['SMTP_PASSWORD'])
+                  server.send_message(msg)
+          except Exception as exc:
+              raise RuntimeError(f'邮件发送失败：{type(exc).__name__}') from None
+          print('失败报警邮件发送成功')
+          PY
