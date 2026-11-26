@@ -1,4 +1,4 @@
-name: Auto Check-in Pro V2.7
+name: Auto Check-in Pro V3.0
 
 on:
   workflow_dispatch:
@@ -8,24 +8,11 @@ on:
         type: boolean
         default: false
   schedule:
-    # UTC：北京时间周一至周五上午
-    - cron: '57 23 * * 0-4'
-    - cron: '2 0 * * 1-5'
-    - cron: '7 0 * * 1-5'
-    - cron: '12 0 * * 1-5'
-    # UTC：北京时间周一至周五晚上
-    - cron: '57 11 * * 1-5'
-    - cron: '7 12 * * 1-5'
-    - cron: '17 12 * * 1-5'
-    - cron: '27 12 * * 1-5'
-    - cron: '37 12 * * 1-5'
-    - cron: '47 12 * * 1-5'
-    - cron: '57 12 * * 1-5'
-    - cron: '7 13 * * 1-5'
-    - cron: '17 13 * * 1-5'
-    - cron: '27 13 * * 1-5'
-    - cron: '37 13 * * 1-5'
-    - cron: '47 13 * * 1-5'
+    # 北京时间工作日，提前23分钟准备。
+    - cron: '37 7 * * 1-5'
+      timezone: 'Asia/Shanghai'
+    - cron: '7 19 * * 1-5'
+      timezone: 'Asia/Shanghai'
 
 permissions:
   contents: read
@@ -49,7 +36,7 @@ env:
 jobs:
   auto-checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 100
     steps:
       - name: Test Email
         if: github.event_name == 'workflow_dispatch' && inputs.test_email == true
@@ -68,73 +55,68 @@ jobs:
           from zoneinfo import ZoneInfo
 
           tz = ZoneInfo('Asia/Shanghai')
-          now = datetime.now(tz)
-          schedule = os.getenv('SCHEDULE', '')
+          plans = {
+              '37 7 * * 1-5': ('morning', 7, 37, 8, 0, 20),
+              '7 19 * * 1-5': ('evening', 19, 7, 19, 30, 60),
+          }
+
+          def make_plan(schedule, now):
+              mode, h, m, sh, sm, duration = plans[' '.join(schedule.split())]
+              launch = now.replace(hour=h, minute=m, second=0, microsecond=0)
+              # 以最近一次已到达的工作日计划为准，而不是实际启动当天。
+              while launch > now or launch.weekday() >= 5:
+                  launch -= timedelta(days=1)
+              start = launch.replace(hour=sh, minute=sm)
+              end = start + timedelta(minutes=duration)
+              seed_text = f'{start:%Y-%m-%d}-{mode}'
+              seed = int(hashlib.sha256(seed_text.encode()).hexdigest(), 16)
+              target = start + timedelta(seconds=random.Random(seed).randrange(duration * 60))
+              return mode, launch, start, end, target, seed_text
 
           def output(**values):
               with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
                   for key, value in values.items():
                       print(f'{key}={value}', file=f)
 
-          print('触发类型:', os.getenv('GITHUB_EVENT_NAME'))
-          print('当前北京时间:', now.isoformat())
-          print('当前UTC时间:', now.astimezone(timezone.utc).isoformat())
-          print('实际触发Cron:', repr(schedule))
-          print('当前日期:', now.date())
-          print('星期编号（周一=1）:', now.isoweekday())
-          print('运行尝试编号:', os.getenv('GITHUB_RUN_ATTEMPT', '1'))
+          def main():
+              now = datetime.now(tz)
+              schedule = os.getenv('SCHEDULE', '')
+              event = os.getenv('GITHUB_EVENT_NAME')
+              print('触发类型:', event)
+              print('当前北京时间:', now.isoformat())
+              print('当前UTC时间:', now.astimezone(timezone.utc).isoformat())
+              print('实际触发Cron:', repr(schedule))
+              print('运行尝试编号:', os.getenv('GITHUB_RUN_ATTEMPT', '1'))
+              if event == 'workflow_dispatch':
+                  output(run='true', mode='manual', target='', start='', end='')
+                  print('手动无提交测试；不受工作日限制')
+                  return
+              if event != 'schedule' or ' '.join(schedule.split()) not in plans:
+                  raise RuntimeError('未知触发类型或Cron；可能为旧版任务')
+              mode, launch, start, end, target, seed_text = make_plan(schedule, now)
+              print('任务类型:', mode)
+              print('预期触发Cron:', repr(' '.join(schedule.split())))
+              print('推算计划启动北京时间:', launch.isoformat())
+              print('推算启动延迟秒数:', round((now-launch).total_seconds()))
+              print('计划日期:', start.date())
+              print('每日随机种子:', seed_text)
+              print('计划时间:', target.isoformat())
+              print('时间窗口开始:', start.isoformat())
+              print('时间窗口结束:', end.isoformat())
+              output(mode=mode, target=target.isoformat(), start=start.isoformat(), end=end.isoformat())
+              if now.weekday() >= 5 or now >= end or now.date() != start.date():
+                  print('MISSED：任务过期，立即结束，不等待，不访问网页')
+                  raise RuntimeError('已错过计划测试窗口')
+              if os.getenv('GITHUB_RUN_ATTEMPT', '1') != '1':
+                  raise RuntimeError('禁止重新执行定时任务')
+              wait = max(0, (target-now).total_seconds())
+              if wait > 83*60:
+                  raise RuntimeError('异常等待超过83分钟')
+              output(run='true')
+              print('有效任务，进入配置检查与浏览器测试')
 
-          if os.getenv('GITHUB_EVENT_NAME') == 'workflow_dispatch':
-              output(run='true', mode='manual', target='')
-              print('手动无提交测试；不受工作日限制')
-              raise SystemExit(0)
-
-          if now.weekday() >= 5:
-              output(run='false', mode='weekend', target='')
-              print('SKIPPED：北京时间周末')
-              raise SystemExit(0)
-
-          parts = schedule.split()
-          if len(parts) != 5:
-              raise RuntimeError('无法解析实际Cron')
-          hour = int(parts[1])
-          if hour in (23, 0):
-              mode, start_hour, duration, slot_minutes = 'morning', 8, 20, 5
-          elif hour in (11, 12, 13):
-              mode, start_hour, duration, slot_minutes = 'evening', 20, 120, 10
-          else:
-              raise RuntimeError('未知Cron时段')
-
-          start = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-          end = start + timedelta(minutes=duration)
-          seed_text = f'{now:%Y-%m-%d}-{mode}'
-          seed = int(hashlib.sha256(seed_text.encode()).hexdigest(), 16)
-          offset = random.Random(seed).randrange(duration * 60)
-          target = start + timedelta(seconds=offset)
-          slot = offset // (slot_minutes * 60)
-          launch = start + timedelta(minutes=slot * slot_minutes - 3)
-          utc = launch.astimezone(timezone.utc)
-          days = '0-4' if utc.hour == 23 else '1-5'
-          expected = f'{utc.minute} {utc.hour} * * {days}'
-          selected = parts == expected.split()
-
-          print('任务类型:', mode)
-          print('每日随机种子:', seed_text)
-          print('计划时间:', target.isoformat())
-          print('预期触发Cron:', repr(expected))
-          print('计划启动北京时间:', launch.isoformat())
-          print('是否执行:', selected)
-          print('时间窗口结束:', end.isoformat())
-          output(run=str(selected).lower(), mode=mode, target=target.isoformat())
-
-          if not selected:
-              print('SKIPPED：当前Cron不是目标时段')
-              raise SystemExit(0)
-          if now >= end:
-              raise RuntimeError('目标任务已错过时间窗口')
-          if os.getenv('GITHUB_RUN_ATTEMPT', '1') != '1':
-              raise RuntimeError('禁止重新执行定时任务')
-          print('目标时段匹配，进入浏览器测试')
+          if __name__ == '__main__':
+              main()
           PY
 
       - name: Check Configuration
@@ -172,12 +154,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install Playwright
+        timeout-minutes: 6
         if: steps.plan.outputs.run == 'true'
         run: |
           python -m pip install playwright
           python -m playwright install --with-deps chromium
 
       - name: Auto Check-in
+        timeout-minutes: 90
         if: steps.plan.outputs.run == 'true'
         env:
           CHECKIN_NAME: ${{ secrets.CHECKIN_NAME }}
@@ -188,6 +172,8 @@ jobs:
           ACCURACY: ${{ secrets.ACCURACY }}
           MODE: ${{ steps.plan.outputs.mode }}
           TARGET: ${{ steps.plan.outputs.target }}
+          START: ${{ steps.plan.outputs.start }}
+          END: ${{ steps.plan.outputs.end }}
         run: |
           python <<'PY'
           import os
@@ -211,11 +197,13 @@ jobs:
 
           if not manual:
               target = datetime.fromisoformat(os.environ['TARGET'])
-              start = target.replace(hour=8 if mode == 'morning' else 20, minute=0, second=0, microsecond=0)
-              end = start + timedelta(minutes=20 if mode == 'morning' else 120)
-              if datetime.now(tz) >= end or datetime.now(tz).weekday() >= 5:
+              start = datetime.fromisoformat(os.environ['START'])
+              end = datetime.fromisoformat(os.environ['END'])
+              if datetime.now(tz) >= end or datetime.now(tz).date() != start.date() or datetime.now(tz).weekday() >= 5:
                   raise RuntimeError('已超出测试时间窗口')
               wait = (target - timedelta(seconds=90) - datetime.now(tz)).total_seconds()
+              if wait > 83*60:
+                  raise RuntimeError('异常等待超过83分钟')
               if wait > 0:
                   log(f'等待准备时间：{wait:.0f} 秒')
                   time.sleep(wait)
@@ -273,6 +261,8 @@ jobs:
                       expect(button).to_have_count(1)
                       if not manual:
                           remaining = (target-datetime.now(tz)).total_seconds()
+                          if remaining > 120:
+                              raise RuntimeError('浏览器阶段异常等待超过120秒')
                           if remaining > 0:
                               page.wait_for_timeout(remaining*1000)
                           now = datetime.now(tz)
@@ -306,13 +296,18 @@ jobs:
               raise RuntimeError(f'{stage}失败') from None
           PY
 
+  notify-failure:
+    needs: auto-checkin
+    if: ${{ always() && (needs.auto-checkin.result == 'failure' || needs.auto-checkin.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       - name: Send Failure Email
-        if: failure()
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MODE: ${{ steps.plan.outputs.mode }}
+          JOB_RESULT: ${{ needs.auto-checkin.result }}
         run: |
           python3 <<'PY'
           import os
@@ -326,7 +321,7 @@ jobs:
           missing = [key for key in required if not os.getenv(key, '').strip()]
           if missing:
               raise RuntimeError('缺少邮件Secrets: ' + ', '.join(missing))
-          mode = os.getenv('MODE') or ('manual' if os.getenv('GITHUB_EVENT_NAME') == 'workflow_dispatch' else 'unknown')
+          mode = 'manual' if os.getenv('GITHUB_EVENT_NAME') == 'workflow_dispatch' else {'37 7 * * 1-5':'morning', '7 19 * * 1-5':'evening'}.get(' '.join(os.getenv('SCHEDULE','').split()), 'unknown')
           label = {'morning':'上午任务','evening':'晚上任务','manual':'手动测试'}.get(mode, '调度任务')
           now = datetime.now(ZoneInfo('Asia/Shanghai'))
           url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
@@ -334,7 +329,7 @@ jobs:
           msg['Subject'] = f'【自动化测试异常】{label}失败'
           msg['From'] = os.environ['SMTP_USER']
           msg['To'] = os.environ['MAIL_TO']
-          msg.set_content(f'Auto Check-in Pro V2.7\n北京时间：{now:%Y-%m-%d %H:%M:%S}\n任务：{label}\n状态：未确认任务成功\n运行日志：{url}')
+          msg.set_content(f'Auto Check-in Pro V3.0\n北京时间：{now:%Y-%m-%d %H:%M:%S}\n任务：{label}\n状态：{os.getenv("JOB_RESULT")}，未确认任务成功\n运行日志：{url}')
           try:
               with smtplib.SMTP_SSL(os.environ['SMTP_HOST'], int(os.environ['SMTP_PORT']), timeout=30, context=ssl.create_default_context()) as server:
                   server.login(os.environ['SMTP_USER'], os.environ['SMTP_PASSWORD'])
